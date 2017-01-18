@@ -10,6 +10,8 @@
 #include <time.h>
 #include <errno.h>
 
+// Boost stuff
+#define BOOST_DATE_TIME_NO_LIB
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
@@ -236,7 +238,7 @@ struct Service
         
 		if (time_to_wait(local_runs)) // nothing to do
 		{
-		  got_something = service->channel->stuff_to_do.Wait(1000);
+		  got_something = service->stuff_to_do->Wait(1000);
 		  if (!got_something)
 		  {
 		    idle_runs++;
@@ -245,7 +247,7 @@ struct Service
 		  }
 		}
 		else
-		  got_something = service->channel->stuff_to_do.Wait(0);
+		  got_something = service->stuff_to_do->Wait(0);
 		
 		if (!got_something)  // no pending request
 		{
@@ -254,12 +256,15 @@ struct Service
 		}
 		
 		// acquire the request
+		int s_msg_num = -1;
 		for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES && !msg; i++)
 		{
 		  msg = service->channel->s_msgs + i;
 		  IPCControl::State s = IPCControl::ClientWait;
 		  if (!msg->control.state.compare_exchange_strong(s, IPCControl::ServerRecv))
 		    msg = 0;
+          else
+            s_msg_num = i;  // remember message number
 		}
 		
         for (int i = 0; i < IPC_CHANNEL_ASYNC_MESSAGES && !msg; i++)
@@ -306,7 +311,7 @@ struct Service
 		  {
 		    IPCControl::State s = msg->control.state.exchange(IPCControl::ServerDone, std::memory_order_acq_rel);
 		    assert(s == IPCControl::ServerRecv || terminated);
-		    Sem_post(msg->control.ready);
+            service->ready[s_msg_num]->Post();
 		    msg = 0;
 	  	  }
         }
@@ -325,49 +330,49 @@ struct Service
   IPCChannel *channel;
   std::string device_name;
 
-  Service(time_t exp = 0, int max_thr = IPC_CHANNEL_MESSAGES) : max_threads(max_thr), done (false), expire_at(exp) 
+  Service(const char *path) : device_name(path), max_threads(IPC_CHANNEL_SYNC_MESSAGES+1), done(false)
   {
-    static int dc = 0;
-    std::stringstream s;
-	s << "shmem_" << dc++;
-	device_name = s.str();
-	shmem_device::remove(device_name.c_str());
-	device = new shmem_device(boost::interprocess::create_only, device_name.c_str(), boost::interprocess::read_write);
-	device->truncate(IPC_MESSAGE_SIZE*IPC_CHANNEL_MESSAGES);
-	shmem = new shared_memory(*device, boost::interprocess::read_write);
-	channel = (IPCChannel *)shmem->get_address();
-	std::cout << "launching service " << device_name.c_str() << "\n";
-	// init semaphores
-	channel->service_proc = GetCurrentProcessId();
-	channel->stuff_to_do = Sem_create();
-	for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
-	  channel->msgs[i].control.ready = Sem_create();
+    device = new shmem_device(boost::interprocess::open_only, path, boost::interprocess::read_write);
+    shmem = new shared_memory(*device, boost::interprocess::read_write);
+    channel = (IPCChannel *)shmem->get_address();
+    stuff_to_do = 0;
+    ready = 0;
   }
-  
+
   bool Run()  // return false when expires
   {
     assert(!done);
-	int used_count = 0;
-	int now = time(0);
-	bool expire = expire_at && expire_at < now;
-    if (threads.empty())  // launch primary service thread
+    bool has_errors = false;
+    if (threads.empty())  // initialize semaphores & launch primary service thread
+    {
+      stuff_to_do = new IPCSem(channel->stuff_to_do);
+      ready = new (IPCSem *)[IPC_CHANNEL_SYNC_MESSAGES];
+      for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
+        ready[i] = new IPCSem(channel->s_msgs[i].control.ready);
 	  threads.push_back(new Thread(this, true));
+    }
 	else
 	{ // running service maintenance
-	  for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
-	    if (channel->msgs[i].control.state != IPCControl::NotUsed)
+	  int used_count = 0;
+	  for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES && !has_errors; i++)
+      {
+        IPCControl::State s = channel->s_msgs[i].control.state.load(std::memory_order_relaxed);
+        has_errors = (s == IPCControl::CommErr);
+	    if (!has_errors && s != IPCControl::NotUsed)
 		  used_count++;
+      }
+	  for (int i = 0; i < IPC_CHANNEL_ASYNC_MESSAGES && !has_errors; i++)
+      {
+        IPCControl::State s = channel->a_msgs[i].control.state.load(std::memory_order_relaxed);
+        has_errors = (s == IPCControl::CommErr);
+	    if (!has_errors && s != IPCControl::NotUsed)
+		  used_count++;
+      }
       CleanupThreads();
-	  if (threads.size() < max_threads && threads.size() < used_count+1) // start another thread
+	  if (!has_errors && threads.size() < max_threads && threads.size() < used_count+1) // start another thread
 	    threads.push_back(new Thread(this));
-	  if (used_count && expire_at && expire_at < now + 5)
-	  { // don't expire active service
-	    expire = false;
-		expire_at = now + 5;
-	  }
-	  time_to_wait(-1);
 	}
-	return !expire;
+	return !has_errors;
   }
   
   bool Shutdown()
@@ -401,14 +406,13 @@ struct Service
 	while (again);
 	// cleanup semaphores
 	for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
-	  Sem_destroy(channel->msgs[i].control.ready);
-	Sem_destroy(channel->stuff_to_do);
+	  delete ready[i];
+    delete channel->stuff_to_do;
 	// destroy shared memory
 	delete shmem;
 	delete device;
-	shmem_device::remove(device_name.c_str());
 	done = true;
-	std::cout << "shutdown service " << device_name.c_str() << "\n";
+
 	return ret;
   }
   
@@ -418,7 +422,8 @@ private:
   shmem_device *device;
   shared_memory *shmem;
   bool done;
-  time_t expire_at;
+  IPCSem *stuff_to_do;
+  IPCSem **ready;
   
   bool CleanupThreads()
   {
@@ -430,7 +435,7 @@ private:
 	    to_wait |= (*i)->terminate && !(*i)->completed;
       if (!to_wait)
 	    break;
-	  std::this_thread::sleep_for(std::chrono::microseconds(10));
+	  std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	while (++count < 1000);
 	int cleanedup = 0;
