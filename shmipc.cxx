@@ -284,7 +284,8 @@ struct shmipc_service
 		// process request
 		local_runs = 0;
 		idle_runs.store(0, std::memory_order_relaxed);
-		void *req = service->read_request(msg->payload); // must be fast!
+        void *payload = ((IPCSyncMessage *)msg)->payload;  // same for both sync & async
+		void *req = service->read_request(payload); // must be fast!
 
         assert(req);
         if (!req && !terminated) // comm error
@@ -308,7 +309,7 @@ struct shmipc_service
 		  void *resp = service->process_request(req);  // do stuff
           assert(resp);  // TODO: need to handle this...
           if (!terminated)
-            service->send_response(resp, msg->payload); // must be fast!
+            service->send_response(resp, payload); // must be fast! TODO: handle errors
 		  if (!terminated)
 		  {
 		    IPCControl::State s = msg->control.state.exchange(IPCControl::ServerDone, std::memory_order_acq_rel);
@@ -454,9 +455,7 @@ shmipc_service_t shmipc_init(char *filepath, encode_fn enf, decode_fn decf, proc
   shmipc_service_t service;
   try {
     service = new shmipc_service(filepath, enf, decf, procf, aprocf);
-  } catch (...) { service = 0; }
-  if (!service)
-    errno = EBADF;  // for now...
+  } catch (...) { service = 0; errno = EBADF; }   // for now...
   return service;
 }
 
@@ -477,61 +476,173 @@ int shmipc_shutdown(shmipc_service_t ipc)
   return ret;
 }
 
-struct shmipc_client;
-struct shmipc_service;
-bool ipc_call(IPCChannel *channel, void *req, void *resp)
+struct shmipc_client
 {
-  IPCMessage *msg = 0;
-  IPCControl::State s;
-  int ch = 0;
-  
-  // find available comm channel
-  do {
-    if (ch == IPC_CHANNEL_MESSAGES)
-	{
-	  ch = 0;
-	  std::this_thread::yield();
-	  // can execute user call back here
-	}
-	msg = channel->msgs + ch;
-	if (!msg->control.state.compare_exchange_strong(s, IPCControl::ClientSend))
-	{
-	  msg = 0;
-	  ch++;
-	}
-	if (s == IPCControl::ServerDown)
-	  return false;
-  } while (!msg);
-  
-  // send request
-  send_request(req, msg->payload);
-  s = msg->control.state.exchange(IPCControl::ClientWait, std::memory_order_acq_rel);
-  assert(s == IPCControl::ClientSend);
-  
-  // signal server
-  Sem_post(stuff_to_do);
+  IPCChannel *channel;
+  std::string device_name;
+  encode_fn send_request;
+  decode_fn read_response;
 
-  // wait for response
-  Sem_wait(ready[ch]);
+  shmipc_client(const char *path, encode_fn enc, decode_fn dec) : 
+    device_name(path), send_request(enc), read_response(dec), done(false), commerr(false)
+  {
+    // allocate shared memory channel
+    device = new shmem_device(boost::interprocess::create_only, device_name.c_str(), boost::interprocess::read_write);
+	device->truncate(sizeof(IPCChannel));
+	shmem = new shared_memory(*device, boost::interprocess::read_write);
+	channel = (IPCChannel *)shmem->get_address();
+    // initialize channel
+    memset(&channel->stuff_to_do, 0, sizeof(IPCSem));
+    channel->stuff_to_do.Init();
+    for (int i = 0; i < IPC_SYNC_CHANNEL_MESSAGES; i++)
+    {
+      memset(&channel->s_msgs[i].control, 0, sizeof(IPCControl));
+      channel->s_msgs[i].control.ready.Init();
+    }
+    for (int i = 0; i < IPC_ASYNC_CHANNEL_MESSAGES; i++)
+      memset(&channel->a_msgs[i].control, 0, sizeof(IPCControl));
+  }
+
+  ~shmipc_client() { if (!done) Destroy(); }
+
+  bool Destroy()
+  {
+    // TODO: signal comm shutdown to service
+	delete shmem;
+	delete device;
+	shmem_device::remove(device_name.c_str());
+    done = true;
+  }
+
+  enum Error { NoError, DeadChannel, ProtocolError, ServerError, BadMsg };
+
+  Error AsyncSend(void *message)
+  {
+    return commerr.load(std::memory_order_relaxed) ? DeadChannel : service_call(message, 0, true);
+  }
+
+  Error Request(void *req, void *resp)
+  {
+    assert(resp);
+    return commerr.load(std::memory_order_relaxed) ? DeadChannel : service_call(req, resp, false);
+  }
+
+private:
+  shmem_device *device;
+  shared_memory *shmem;
+  bool done;
+  std::atomic<bool> commerr;
+
+  Error service_call(void *req, void *resp, bool async)
+  {
+    IPCMessage *msg = 0;
+    IPCControl::State s;
+    int ch = 0;
+
+    while (true)
+    {
+      msg = (async ? channel->a_msgs : channel->s_msgs) + ch;
+      if (msg->control.state.compare_exchange_strong(s, IPCControl::ClientSend))
+        break;   // got comm channel
+
+      if (s == IPCControl::CommErr)
+      {
+        commerr = true;
+        return DeadChannel;
+      }
+
+      ch++;
+      if ((async && ch == IPC_ASYNC_CHANNEL_MESSAGES) ||
+         (!async && ch == IPC_SYNC_CHANNEL_MESSAGES))
+      { // all messages are used by comm
+        ch = 0;
+        std::this_thread::yield();
+        // can execute user call back here
+      }
+    }
   
-  s = msg->control.state.load(std::memory_order_acquire);
+    // send request
+    void *payload = ((IPCSyncMessage *)msg)->payload;
+    send_request(req, payload);  // TODO: handle errors
+    s = msg->control.state.exchange(async ? IPCControl::ClientAsync : IPCControl::ClientWait, std::memory_order_acq_rel);
+    assert(s == IPCControl::ClientSend);
+
+    if (async)  // we are done for async
+      return NoError;
   
-  // handle comm errors
-  if (s == IPCControl::ServerErr)
-  {   
-	msg->control.state.store(IPCControl::NotUsed, std::memory_order_relaxed);
-	return false; 
-  } 
-  else if (s == IPCControl::ServerDown)
-	return false;
+    // signal server
+    channel->stuff_to_do.Post();
+
+    // wait for response
+    msg->control.ready.Wait();  // TODO: handle idle
   
-  assert(s == IPCControl::ServerDone);
+    s = msg->control.state.load(std::memory_order_acquire);
   
-  // read response
-  read_response(msg->payload, resp);
+    // handle comm errors
+    if (s == IPCControl::CommErr)
+    {   
+      commerr = true;
+      return ServerError;
+    }
+    assert(s == IPCControl::ServerDone);
   
-  // free comm channel
-  msg->control.state.store(IPCControl::NotUsed, std::memory_order_relaxed);
+    // read response
+    *(void **)resp = read_response(payload);
   
-  return true;
+    // free comm channel
+    s = msg->control.state.exchange(IPCControl::NotUsed, std::memory_order_relaxed);
+    assert(s == IPCControl::ServerDone);
+  
+    return NoError;
+  }
+};
+
+shmipc_client_t shmipc_dial(char *filepath, encode_fn encoder, decode_fn decoder)
+{
+  shmipc_client_t ipc;
+  try {
+    ipc = new shmipc_client(filepath, encoder, decoder);
+  } catch (...) { ipc = 0; errno = EBADF; }
+  return ipc;
 }
+
+static int clienterr_to_errno(shmipc_client::Error err)
+{
+  switch (err)
+  {
+    case shmipc_client::NoError: return 0;
+    case shmipc_client::DeadChannel: return ECONNABORTED;
+    case shmipc_client::ProtocolError: return EPROTO;
+    case shmipc_client::BadMsg: return EBADMSG;
+    case shmipc_client::ServerError: return EIO;
+  }
+  assert(0);
+  return 0;
+}
+
+void *shmipc_call(shmipc_client_t ipc, void *request_object)
+{
+  void *ret = 0;
+  int err = clienterr_to_errno(ipc->Request(request_object, &ret));
+  if (err)
+    errno = err;
+  return err ? 0 : ret;
+}
+
+int shmipc_send_async(shmipc_client_t ipc, void *message)
+{
+  int err = clienterr_to_errno(ipc->AsyncSend(message);
+  if (err)
+    errno = err;
+  return err ? -1 : 0;
+}
+
+int shmipc_close(shmipc_client_t ipc)
+{
+  int ret = 0;
+  try {
+    delete ipc;
+  } catch (...) { ret = -1; errno = EBADF; }
+  return ret;
+}
+
