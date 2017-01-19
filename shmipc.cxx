@@ -14,6 +14,8 @@
 #define BOOST_DATE_TIME_NO_LIB
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
+typedef boost::interprocess::shared_memory_object shmem_device;
+typedef boost::interprocess::mapped_region shared_memory;
 
 #include "shmipc.h"
 
@@ -162,9 +164,9 @@ typedef char aling64bytes[64];
 struct IPCControl
 {
   enum State { 
-    NotUsed,	
-    ClientSend, ClientWait, ServerRecv, ServerDone,   // sync request
-    ClientAsync, ServerAsync,                         // async request
+    NotUsed, ClientSend,                 // sync & async requests
+    ClientWait, ServerRecv, ServerDone,  // sync request
+    ClientAsync, ServerAsync,            // async request
     CommErr };
   union { struct {
   std::atomic<State> state;
@@ -207,7 +209,7 @@ bool time_to_wait(int64_t count)
 }
 
 // service
-struct Service
+struct shmipc_service
 {
   struct Thread
   {
@@ -216,10 +218,10 @@ struct Service
 	std::atomic<bool> completed;  // thread has finished running
 	std::atomic<int>  idle_runs;
     std::thread *thr;
-	Service *service;
+	shmipc_service *service;
 	IPCMessage *msg;
 	bool primary;
-    Thread(Service *s, bool p = false) : 
+    Thread(shmipc_service *s, bool p = false) : 
 	  service(s), terminate(false), terminated(false), completed(false), idle_runs(0), msg(0), primary(p)
 	{ thr = new std::thread(RunThread, this); thr->detach(); }
 	~Thread() { delete thr; }
@@ -282,7 +284,7 @@ struct Service
 		// process request
 		local_runs = 0;
 		idle_runs.store(0, std::memory_order_relaxed);
-		void *req = read_request(msg->payload); // must be fast!
+		void *req = service->read_request(msg->payload); // must be fast!
 
         assert(req);
         if (!req && !terminated) // comm error
@@ -298,15 +300,15 @@ struct Service
           IPCControl::State s = msg->control.state.exchange(IPCControl::NotUsed, std::memory_order_acq_rel);
           assert(s == IPCControl::ServerAsync || terminated);
           msg = 0;
-          process_async_request(req);  // do stuff
+          service->process_async_request(req);  // do stuff
         }
 		else if (!terminated)
         {
           // sync request
-		  void *resp = process_request(req);  // do stuff
+		  void *resp = service->process_request(req);  // do stuff
           assert(resp);  // TODO: need to handle this...
           if (!terminated)
-            send_response(resp, msg->payload); // must be fast!
+            service->send_response(resp, msg->payload); // must be fast!
 		  if (!terminated)
 		  {
 		    IPCControl::State s = msg->control.state.exchange(IPCControl::ServerDone, std::memory_order_acq_rel);
@@ -324,19 +326,20 @@ struct Service
 	}
   };
   
-  typedef boost::interprocess::shared_memory_object shmem_device;
-  typedef boost::interprocess::mapped_region shared_memory;
-  
   IPCChannel *channel;
   std::string device_name;
+  encode_fn send_response;
+  decode_fn read_request;
+  process_fn process_request;
+  process_async_fn process_async_request;
 
-  Service(const char *path) : device_name(path), max_threads(IPC_CHANNEL_SYNC_MESSAGES+1), done(false)
+  shmipc_service(const char *path, encode_fn enf, decode_fn decf, process_fn procf, process_async_fn aprocf) : 
+    device_name(path), send_response(enf), read_request(decf), process_request(procf), process_async_request(aprocf),
+    max_threads(IPC_CHANNEL_SYNC_MESSAGES+1), done(false), stuff_to_do(0), ready(0)
   {
     device = new shmem_device(boost::interprocess::open_only, path, boost::interprocess::read_write);
     shmem = new shared_memory(*device, boost::interprocess::read_write);
     channel = (IPCChannel *)shmem->get_address();
-    stuff_to_do = 0;
-    ready = 0;
   }
 
   bool Run()  // return false when expires
@@ -385,25 +388,15 @@ struct Service
 	for (auto i = threads.begin(); i != threads.end(); i++)
 	  (*i)->terminated = true;
 	ret |= CleanupThreads();
-	// cleanup channel
-	bool again;
-	do
-	{
-	  again = false;
-	  for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
-	  {
-	    IPCControl::State s = IPCControl::NotUsed;
-		if (channel->msgs[i].control.state.compare_exchange_strong(s, IPCControl::ServerDown) || s == IPCControl::ServerDown)
-		  continue;
-		if (s == IPCControl::ClientSend || s == IPCControl::ServerDone)
-		  again = true;
-		else  // shouldn't be
-		  channel->msgs[i].control.state = IPCControl::ServerDown;
-	  }
-	  if (again)  // wait for client
-	    std::this_thread::yield();
-	} 
-	while (again);
+	// cleanup comm channels
+	for (int i = 0; i < IPC_SYNC_CHANNEL_MESSAGES; i++)
+    {
+      IPCControl::State s = channel->s_msgs[i].control.state.exchange(IPCControl::CommErr);
+      if (s == IPCControl::ClientWait)
+        ready[i]->Post();  // release client
+    }
+    for (int i = 0; i < IPC_ASYNC_CHANNEL_MESSAGES; i++)
+      channel->a_msgs[i].control.state.store(IPCControl::CommErr);
 	// cleanup semaphores
 	for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
 	  delete ready[i];
@@ -411,10 +404,13 @@ struct Service
 	// destroy shared memory
 	delete shmem;
 	delete device;
+
 	done = true;
 
 	return ret;
   }
+
+  ~shmipc_service() { if (!done) Shutdown(); }
   
 private:
   int max_threads;
@@ -444,11 +440,6 @@ private:
 	  Thread *th = threads[i];
 	  if (th->terminated)
 	  {
-	    if (th->msg) // signal error to client
-		{
-	      IPCControl::State s = IPCControl::ServerRecv;
-		  th->msg->control.state.compare_exchange_strong(s, IPCControl::ServerErr);
-		}
 	    threads.erase(threads.begin() + i);
 		delete th;
 		cleanedup++;
@@ -457,3 +448,90 @@ private:
 	return cleanedup > 0;
   }
 };
+
+shmipc_service_t shmipc_init(char *filepath, encode_fn enf, decode_fn decf, process_fn procf, process_async_fn aprocf)
+{
+  shmipc_service_t service;
+  try {
+    service = new shmipc_service(filepath, enf, decf, procf, aprocf);
+  } catch (...) { service = 0; }
+  if (!service)
+    errno = EBADF;  // for now...
+  return service;
+}
+
+int shmipc_run(shmipc_service_t ipc)
+{
+  int ret = ipc->Run() ? 0 : -1;
+  if (ret)
+    errno = ECONNABORTED;
+  return ret;
+}
+
+int shmipc_shutdown(shmipc_service_t ipc)
+{
+  int ret = 0;
+  try {
+    delete ipc;
+  catch (...) { ret = -1; errno = EBADF; }  // not sure...
+  return ret;
+}
+
+struct shmipc_client;
+struct shmipc_service;
+bool ipc_call(IPCChannel *channel, void *req, void *resp)
+{
+  IPCMessage *msg = 0;
+  IPCControl::State s;
+  int ch = 0;
+  
+  // find available comm channel
+  do {
+    if (ch == IPC_CHANNEL_MESSAGES)
+	{
+	  ch = 0;
+	  std::this_thread::yield();
+	  // can execute user call back here
+	}
+	msg = channel->msgs + ch;
+	if (!msg->control.state.compare_exchange_strong(s, IPCControl::ClientSend))
+	{
+	  msg = 0;
+	  ch++;
+	}
+	if (s == IPCControl::ServerDown)
+	  return false;
+  } while (!msg);
+  
+  // send request
+  send_request(req, msg->payload);
+  s = msg->control.state.exchange(IPCControl::ClientWait, std::memory_order_acq_rel);
+  assert(s == IPCControl::ClientSend);
+  
+  // signal server
+  Sem_post(stuff_to_do);
+
+  // wait for response
+  Sem_wait(ready[ch]);
+  
+  s = msg->control.state.load(std::memory_order_acquire);
+  
+  // handle comm errors
+  if (s == IPCControl::ServerErr)
+  {   
+	msg->control.state.store(IPCControl::NotUsed, std::memory_order_relaxed);
+	return false; 
+  } 
+  else if (s == IPCControl::ServerDown)
+	return false;
+  
+  assert(s == IPCControl::ServerDone);
+  
+  // read response
+  read_response(msg->payload, resp);
+  
+  // free comm channel
+  msg->control.state.store(IPCControl::NotUsed, std::memory_order_relaxed);
+  
+  return true;
+}
