@@ -19,19 +19,9 @@ typedef boost::interprocess::mapped_region shared_memory;
 
 #include "shmipc.h"
 
-#if defined(_WIN32)
-#define OSAPI WINDOWS
-#elif defined(__MACH__)
-#define OSAPI MACOS
-#elif defined(__unix__)
-#define OSAPI POSIX
-#else
-#error "unknown OS"
-#endif
-
 // semaphores
 
-#if OSAPI == WINDOWS
+#if defined(_WIN32)
 
 #include <Windows.h>
 
@@ -86,9 +76,9 @@ struct IPCSem
   }
 };
 
-#elif OSAPI == MACOS
+#elif defined(__MACH__)
 #error "Not implemeted for Mac yet"
-#else   // POSIX
+#elif defined(__unix__)
 
 #include <semaphore.h>
 
@@ -168,21 +158,22 @@ struct IPCControl
     ClientWait, ServerRecv, ServerDone,  // sync request
     ClientAsync, ServerAsync,            // async request
     CommErr };
-  union { struct {
   std::atomic<State> state;
   IPCSem ready; 
-  }; aling64bytes align; };
 };
 
 struct IPCMessage
 {
+union {
   IPCControl control;
+  aling64bytes align; 
+};
 };
 
 #define IPC_SYNC_PAYLOAD_SIZE (1024*64)
 struct IPCSyncMessage : public IPCMessage
 {
-  char payload[IPC_MESSAGE_PAYLOAD_SIZE];
+  char payload[IPC_SYNC_PAYLOAD_SIZE];
 };
 
 #define IPC_ASYNC_PAYLOAD_SIZE (1024)
@@ -309,7 +300,7 @@ struct shmipc_service
 		  void *resp = service->process_request(req);  // do stuff
           assert(resp);  // TODO: need to handle this...
           if (!terminated)
-            service->send_response(resp, payload); // must be fast! TODO: handle errors
+            service->send_response(resp, payload, IPC_SYNC_PAYLOAD_SIZE); // must be fast! TODO: handle errors
 		  if (!terminated)
 		  {
 		    IPCControl::State s = msg->control.state.exchange(IPCControl::ServerDone, std::memory_order_acq_rel);
@@ -350,7 +341,7 @@ struct shmipc_service
     if (threads.empty())  // initialize semaphores & launch primary service thread
     {
       stuff_to_do = new IPCSem(channel->stuff_to_do);
-      ready = new (IPCSem *)[IPC_CHANNEL_SYNC_MESSAGES];
+      ready = new IPCSem*[IPC_CHANNEL_SYNC_MESSAGES];
       for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
         ready[i] = new IPCSem(channel->s_msgs[i].control.ready);
 	  threads.push_back(new Thread(this, true));
@@ -390,18 +381,18 @@ struct shmipc_service
 	  (*i)->terminated = true;
 	ret |= CleanupThreads();
 	// cleanup comm channels
-	for (int i = 0; i < IPC_SYNC_CHANNEL_MESSAGES; i++)
+	for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
     {
       IPCControl::State s = channel->s_msgs[i].control.state.exchange(IPCControl::CommErr);
       if (s == IPCControl::ClientWait)
         ready[i]->Post();  // release client
     }
-    for (int i = 0; i < IPC_ASYNC_CHANNEL_MESSAGES; i++)
+    for (int i = 0; i < IPC_CHANNEL_ASYNC_MESSAGES; i++)
       channel->a_msgs[i].control.state.store(IPCControl::CommErr);
 	// cleanup semaphores
-	for (int i = 0; i < IPC_CHANNEL_MESSAGES; i++)
+	for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
 	  delete ready[i];
-    delete channel->stuff_to_do;
+    delete stuff_to_do;
 	// destroy shared memory
 	delete shmem;
 	delete device;
@@ -472,7 +463,7 @@ int shmipc_shutdown(shmipc_service_t ipc)
   int ret = 0;
   try {
     delete ipc;
-  catch (...) { ret = -1; errno = EBADF; }  // not sure...
+  } catch (...) { ret = -1; errno = EBADF; }  // not sure...
   return ret;
 }
 
@@ -494,12 +485,12 @@ struct shmipc_client
     // initialize channel
     memset(&channel->stuff_to_do, 0, sizeof(IPCSem));
     channel->stuff_to_do.Init();
-    for (int i = 0; i < IPC_SYNC_CHANNEL_MESSAGES; i++)
+    for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
     {
       memset(&channel->s_msgs[i].control, 0, sizeof(IPCControl));
       channel->s_msgs[i].control.ready.Init();
     }
-    for (int i = 0; i < IPC_ASYNC_CHANNEL_MESSAGES; i++)
+    for (int i = 0; i < IPC_CHANNEL_ASYNC_MESSAGES; i++)
       memset(&channel->a_msgs[i].control, 0, sizeof(IPCControl));
   }
 
@@ -541,7 +532,10 @@ private:
 
     while (true)
     {
-      msg = (async ? channel->a_msgs : channel->s_msgs) + ch;
+      if (async)
+        msg = channel->a_msgs + ch;
+      else
+        msg = channel->s_msgs + ch;
       if (msg->control.state.compare_exchange_strong(s, IPCControl::ClientSend))
         break;   // got comm channel
 
@@ -552,8 +546,8 @@ private:
       }
 
       ch++;
-      if ((async && ch == IPC_ASYNC_CHANNEL_MESSAGES) ||
-         (!async && ch == IPC_SYNC_CHANNEL_MESSAGES))
+      if ((async && ch == IPC_CHANNEL_ASYNC_MESSAGES) ||
+         (!async && ch == IPC_CHANNEL_SYNC_MESSAGES))
       { // all messages are used by comm
         ch = 0;
         std::this_thread::yield();
@@ -563,7 +557,7 @@ private:
   
     // send request
     void *payload = ((IPCSyncMessage *)msg)->payload;
-    send_request(req, payload);  // TODO: handle errors
+    send_request(req, payload, async ? IPC_ASYNC_PAYLOAD_SIZE : IPC_SYNC_PAYLOAD_SIZE);  // TODO: handle errors
     s = msg->control.state.exchange(async ? IPCControl::ClientAsync : IPCControl::ClientWait, std::memory_order_acq_rel);
     assert(s == IPCControl::ClientSend);
 
@@ -631,7 +625,7 @@ void *shmipc_call(shmipc_client_t ipc, void *request_object)
 
 int shmipc_send_async(shmipc_client_t ipc, void *message)
 {
-  int err = clienterr_to_errno(ipc->AsyncSend(message);
+  int err = clienterr_to_errno(ipc->AsyncSend(message));
   if (err)
     errno = err;
   return err ? -1 : 0;
