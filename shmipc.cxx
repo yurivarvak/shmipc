@@ -164,10 +164,8 @@ struct IPCControl
 
 struct IPCMessage
 {
-union {
   IPCControl control;
-  aling64bytes align; 
-};
+  // need alignment
 };
 
 #define IPC_SYNC_PAYLOAD_SIZE (1024*64)
@@ -186,10 +184,8 @@ struct IPCAsyncMessage : public IPCMessage
 #define IPC_CHANNEL_ASYNC_MESSAGES 64
 struct IPCChannel
 {
-union {
   IPCSem stuff_to_do;
-  aling64bytes align; 
-};
+  // need alignment
   IPCSyncMessage s_msgs[IPC_CHANNEL_SYNC_MESSAGES];
   IPCAsyncMessage a_msgs[IPC_CHANNEL_ASYNC_MESSAGES];
 };
