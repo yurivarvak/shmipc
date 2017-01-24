@@ -42,7 +42,7 @@ struct IPCSem
     else
     {
       HANDLE proc = OpenProcess(PROCESS_ALL_ACCESS, 0, other.owner_proc);
-      BOOL ok = DuplicateHandle(other.owner_proc, other.sem, owner_proc, &sem, 0, 0, DUPLICATE_SAME_ACCESS);
+      BOOL ok = DuplicateHandle(proc, other.sem, owner_proc, &sem, 0, 0, DUPLICATE_SAME_ACCESS);
       assert(ok);
     }
     init = true;
