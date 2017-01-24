@@ -499,6 +499,7 @@ struct shmipc_client
 	delete device;
 	shmem_device::remove(device_name.c_str());
     done = true;
+    return true;
   }
 
   enum Error { NoError, DeadChannel, ProtocolError, ServerError, BadMsg };
