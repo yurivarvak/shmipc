@@ -558,12 +558,12 @@ private:
     s = msg->control.state.exchange(async ? IPCControl::ClientAsync : IPCControl::ClientWait, std::memory_order_acq_rel);
     assert(s == IPCControl::ClientSend);
 
-    if (async)  // we are done for async
-      return NoError;
-  
     // signal server
     channel->stuff_to_do.Post();
 
+    if (async)  // we are done for async
+      return NoError;
+  
     // wait for response
     msg->control.ready.Wait();  // TODO: handle idle
   
