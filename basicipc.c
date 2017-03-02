@@ -5,6 +5,7 @@
 #include <wchar.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include "basicipc.h"
 
 typedef union

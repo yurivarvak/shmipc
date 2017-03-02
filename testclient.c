@@ -1,5 +1,8 @@
 
 
+#include <string.h>
+#include <stdbool.h>
+#include <assert.h>
 #include "basicipc.h"
 
 static shmipc_client_t ipc;
