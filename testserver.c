@@ -1,6 +1,16 @@
 
-#include <unistd.h>
 #include "basicipc.h"
+
+#if defined(_WIN32)
+#include <Windows.h>
+unsigned sleep(unsigned seconds)
+{
+  Sleep(seconds*1000);
+  return seconds;
+}
+#else
+#include <unistd.h>
+#endif
 
 int main()
 {
