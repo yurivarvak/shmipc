@@ -55,6 +55,8 @@ int main()
 
   ipc = basicipc_dial("ipc.shm");
 
+  assert(ipc && "can't init ipc");
+
   s1 = (char *)rem_malloc(200);
   rem_strput(s1, "some stuff");
   s2 = (char *)rem_malloc(80);
