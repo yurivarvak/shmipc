@@ -6,7 +6,7 @@ OBJEXT = .obj
 EXEEXT = .exe
 LINKLIBS =
 else
-CC = gcc -std=c99
+CC = gcc -std=gnu99
 CPP = g++ -std=c++11 -I.
 OBJEXT = .o
 EXEEXT = 

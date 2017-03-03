@@ -49,14 +49,43 @@ int rem_strget(void *p, char *s, int len)
   return 0;
 }
 
+#if defined(_WIN32)
+#include <Windows.h>
+#define CLOCK_REALTIME 0
+struct timespec { long tv_sec; long tv_nsec; };    
+static int clock_gettime(int, struct timespec *spec)
+{
+  __int64 wintime; GetSystemTimeAsFileTime((FILETIME*)&wintime);
+  wintime -= 116444736000000000i64; 
+  spec->tv_sec = wintime / 10000000i64; 
+  spec->tv_nsec = wintime % 10000000i64 * 100;  
+  return 0;
+}
+#else
+#include <time.h>
+#endif
+
+#include <stdint.h>
+#include <stdio.h>
+
+int64_t diff_ts(struct timespec *ts, struct timespec *te) 
+{
+  int64_t res = te->tv_sec - ts->tv_sec;
+  res *= 1000000000; /* to ns */
+  return res + te->tv_nsec - ts->tv_nsec;
+}
+
 int main()
 {
   char *str = "some stuff";
   char *s1, *s2, buf[80];
+  struct timespec t1, t2;
 
   ipc = basicipc_dial("ipc.shm");
 
   assert(ipc && "can't init ipc");
+
+  clock_gettime(CLOCK_REALTIME, &t1);
 
   s1 = (char *)rem_malloc(200);
   rem_strput(s1, str);
@@ -66,6 +95,10 @@ int main()
   assert(!strcmp(buf, str));
   rem_free(s2);
   rem_free(s1);
+
+  clock_gettime(CLOCK_REALTIME, &t2);
+
+  printf("diff time (ns): %lld\n", diff_ts(&t1, &t2));
 
   shmipc_close(ipc);
 
