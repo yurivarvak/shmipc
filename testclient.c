@@ -64,6 +64,8 @@ int main()
   rem_memcpy(s2, s1, strlen(str)+1);
   rem_strget(s2, buf, sizeof(buf));
   assert(!strcmp(buf, str));
+  rem_free(s2);
+  rem_free(s1);
 
   shmipc_close(ipc);
 
