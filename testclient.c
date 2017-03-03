@@ -111,7 +111,7 @@ int main()
 
   clock_gettime(CLOCK_REALTIME, &t2);
 
-  printf("diff time (microsec): %lf\n", (double)diff_ts(&t1, &t2) / (num * 7));
+  printf("diff time (microsec/call): %5.3lf\n", (double)diff_ts(&t1, &t2) / (num * 7) / 1000);
 
   shmipc_close(ipc);
 
