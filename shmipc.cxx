@@ -186,6 +186,8 @@ struct IPCChannel
 {
   IPCSem stuff_to_do;
   // need alignment
+  std::atomic<bool> service_started;
+  // need alignment
   IPCSyncMessage s_msgs[IPC_CHANNEL_SYNC_MESSAGES];
   IPCAsyncMessage a_msgs[IPC_CHANNEL_ASYNC_MESSAGES];
 };
@@ -340,6 +342,7 @@ struct shmipc_service
       ready = new IPCSem*[IPC_CHANNEL_SYNC_MESSAGES];
       for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
         ready[i] = new IPCSem(channel->s_msgs[i].control.ready);
+      channel->service_started = true;
 	  threads.push_back(new Thread(this, true));
     }
 	else
@@ -474,6 +477,7 @@ struct shmipc_client
     device_name(path), send_request(enc), read_response(dec), done(false), commerr(false)
   {
     // allocate shared memory channel
+    shmem_device::remove(device_name.c_str());
     device = new shmem_device(boost::interprocess::create_only, device_name.c_str(), boost::interprocess::read_write);
 	device->truncate(sizeof(IPCChannel));
 	shmem = new shared_memory(*device, boost::interprocess::read_write);
@@ -481,6 +485,7 @@ struct shmipc_client
     // initialize channel
     memset(&channel->stuff_to_do, 0, sizeof(IPCSem));
     channel->stuff_to_do.Init();
+    channel->service_started = false;
     for (int i = 0; i < IPC_CHANNEL_SYNC_MESSAGES; i++)
     {
       memset(&channel->s_msgs[i].control, 0, sizeof(IPCControl));
@@ -526,6 +531,9 @@ private:
     IPCMessage *msg = 0;
     IPCControl::State s;
     int ch = 0;
+
+    while (!channel->service_started)
+      std::this_thread::yield();  // wait for service
 
     while (true)
     {
