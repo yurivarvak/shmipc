@@ -61,7 +61,13 @@ static int clock_gettime(int unused, struct timespec *spec)
   spec->tv_nsec = wintime % 10000000i64 * 100;  
   return 0;
 }
+unsigned sleep(unsigned seconds)
+{
+  Sleep(seconds*1000);
+  return seconds;
+}
 #else
+#include <unistd.h>
 #include <time.h>
 #endif
 
@@ -80,11 +86,13 @@ int main()
   char *str = "some stuff";
   char *s1, *s2, buf[80];
   struct timespec t1, t2;
-  int i, num = 1000;
+  int i, num = 100000;
 
   ipc = basicipc_dial("ipc.shm");
 
   assert(ipc && "can't init ipc");
+
+  sleep(1);
 
   clock_gettime(CLOCK_REALTIME, &t1);
 
@@ -103,7 +111,7 @@ int main()
 
   clock_gettime(CLOCK_REALTIME, &t2);
 
-  printf("diff time (ns): %lld\n", diff_ts(&t1, &t2));
+  printf("diff time (microsec): %lf\n", (double)diff_ts(&t1, &t2) / (num * 7));
 
   shmipc_close(ipc);
 

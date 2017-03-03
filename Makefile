@@ -1,7 +1,7 @@
 
 ifeq ($(PRO_MACHINE_TYPE), x86e_win64)
-CC = cl -Zi
-CPP = cl /EHsc /I. -Zi
+CC = cl /O2 /Zi
+CPP = cl /O2 /EHsc /I. /Zi
 OBJEXT = .obj
 EXEEXT = .exe
 LINKLIBS =
