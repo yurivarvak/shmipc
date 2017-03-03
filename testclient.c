@@ -51,6 +51,7 @@ int rem_strget(void *p, char *s, int len)
 
 int main()
 {
+  char *str = "some stuff";
   char *s1, *s2, buf[80];
 
   ipc = basicipc_dial("ipc.shm");
@@ -58,11 +59,11 @@ int main()
   assert(ipc && "can't init ipc");
 
   s1 = (char *)rem_malloc(200);
-  rem_strput(s1, "some stuff");
+  rem_strput(s1, str);
   s2 = (char *)rem_malloc(80);
-  rem_memcpy(s2, s1, strlen(s1)+1);
+  rem_memcpy(s2, s1, strlen(str)+1);
   rem_strget(s2, buf, sizeof(buf));
-  assert(!strcmp(buf, s1));
+  assert(!strcmp(buf, str));
 
   shmipc_close(ipc);
 
