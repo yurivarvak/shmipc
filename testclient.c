@@ -86,7 +86,7 @@ int main()
   char *str = "some stuff";
   char *s1, *s2, buf[80];
   struct timespec t1, t2;
-  int i, num = 100000;
+  int i, num = 1000000;
 
   ipc = basicipc_dial("ipc.shm");
 
