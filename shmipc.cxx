@@ -499,7 +499,8 @@ struct shmipc_client
 
   bool Destroy()
   {
-    // TODO: signal comm shutdown to service
+    channel->s_msgs[0].control.state = IPCControl::CommErr; // signal comm shutdown to service
+
 	delete shmem;
 	delete device;
 	shmem_device::remove(device_name.c_str());
