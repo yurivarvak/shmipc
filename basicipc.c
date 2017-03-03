@@ -179,7 +179,28 @@ int basicipc_call(shmipc_client_t ipc, int reqid, ...)
 
 int basicipc_send_async(shmipc_client_t ipc, int reqid, ...)
 {
-  return 0;
+  assert(reqid >= 0 && reqid < REQ_MAX);
+  basicipc_reqdef *rdef = basicipc_DD + reqid;
+  client_request app;
+  va_list vl;
+
+  va_start(vl,reqid);
+
+  app.reqid = reqid;
+  for (int i = 0; i < strlen(rdef->args); i++)
+  {
+    if (rdef->args[i] == 'I') app.args[i].i32 = va_arg(vl,int);
+    else if (rdef->args[i] == 'P') app.args[i].p = va_arg(vl,void *);
+    else if (rdef->args[i] == 'S') app.args[i].s = va_arg(vl,char *);
+    else if (rdef->args[i] == 'W') app.args[i].ws = va_arg(vl,wchar_t *);
+    else if (rdef->args[i] == 'B') app.args[i].b = va_arg(vl,bool);
+    else if (rdef->args[i] == 'L') app.args[i].i64 = va_arg(vl,int64_t);
+    else assert(0 && "unknown arg type");
+  }
+
+  va_end(vl);
+
+  return shmipc_send_async(ipc, &app);
 }
 
 // server stuff
