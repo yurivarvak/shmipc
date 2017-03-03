@@ -264,6 +264,8 @@ struct shmipc_service
           IPCControl::State s = IPCControl::ClientAsync;
           if (!msg->control.state.compare_exchange_strong(s, IPCControl::ServerAsync))
             msg = 0;
+          else
+            async = true;
         }
 
 		assert(msg);
