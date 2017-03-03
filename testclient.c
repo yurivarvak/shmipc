@@ -80,12 +80,15 @@ int main()
   char *str = "some stuff";
   char *s1, *s2, buf[80];
   struct timespec t1, t2;
+  int i, num = 1000;
 
   ipc = basicipc_dial("ipc.shm");
 
   assert(ipc && "can't init ipc");
 
   clock_gettime(CLOCK_REALTIME, &t1);
+
+  for (i = 0; i < num; i++) {
 
   s1 = (char *)rem_malloc(200);
   rem_strput(s1, str);
@@ -95,6 +98,8 @@ int main()
   assert(!strcmp(buf, str));
   rem_free(s2);
   rem_free(s1);
+
+}
 
   clock_gettime(CLOCK_REALTIME, &t2);
 
