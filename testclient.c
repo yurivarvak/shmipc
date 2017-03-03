@@ -53,7 +53,7 @@ int rem_strget(void *p, char *s, int len)
 #include <Windows.h>
 #define CLOCK_REALTIME 0
 struct timespec { long tv_sec; long tv_nsec; };    
-static int clock_gettime(int, struct timespec *spec)
+static int clock_gettime(int unused, struct timespec *spec)
 {
   __int64 wintime; GetSystemTimeAsFileTime((FILETIME*)&wintime);
   wintime -= 116444736000000000i64; 
