@@ -6,8 +6,8 @@ OBJEXT = .obj
 EXEEXT = .exe
 LINKLIBS =
 else
-CC = gcc -std=gnu99
-CPP = g++ -std=c++11 -I.
+CC = gcc -std=gnu99 -O2
+CPP = g++ -std=c++11 -I. -O2
 OBJEXT = .o
 EXEEXT = 
 LINKLIBS = -lrt -pthread

@@ -92,7 +92,7 @@ struct IPCSem
   IPCSem(const IPCSem &other)
   {
     assert(other.init);
-    sem = other.sem;
+    sem = (sem_t *) &other.holder;
     own = false;
     init = true;
   }
