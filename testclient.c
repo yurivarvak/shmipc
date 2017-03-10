@@ -43,8 +43,8 @@ bool rem_strput(void *p, char *s)
 
 int rem_strget(void *p, char *s, int len)
 {
-  if (!basicipc_call(ipc, REQ_STRGET, p, len, s, len+1))
-    return strlen(s);
+  if (!basicipc_call(ipc, REQ_STRGET, p, len-1, s, &len))
+    return len;
   // TODO: handle errors
   return 0;
 }

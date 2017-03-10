@@ -13,6 +13,8 @@ typedef union
   bool b;       /* 'B' */
   int32_t i32;  /* 'I' */
   int64_t i64;  /* 'L' */
+  double f;     /* 'F' */
+  double lf;    /* 'D' */
   void *p;      /* 'P' */
   char *s;      /* 'S' */
   wchar_t *ws;  /* 'W' */
@@ -60,6 +62,8 @@ static int send_request(client_request *req, wire_payload *payload, int max_size
     switch (rdef->args[i]) {
     case 'I':
     case 'L':
+    case 'F':
+    case 'D':
     case 'P':
     case 'B':
       payload->args[i] = req->args[i];
@@ -92,6 +96,8 @@ static client_request *read_response(wire_payload *payload)
   switch (rdef->ret) {
     case 'I':
     case 'L':
+    case 'F':
+    case 'D':
     case 'P':
     case 'B':
       resp->ret = payload->args[0];
@@ -126,6 +132,7 @@ int basicipc_call(shmipc_client_t ipc, int reqid, ...)
   basicipc_reqdef *rdef = basicipc_DD + reqid;
   client_request app;
   void *ret;
+  int *str_len_ret;
   va_list vl;
 
   va_start(vl,reqid);
@@ -139,18 +146,22 @@ int basicipc_call(shmipc_client_t ipc, int reqid, ...)
     else if (rdef->args[i] == 'W') app.args[i].ws = va_arg(vl,wchar_t *);
     else if (rdef->args[i] == 'B') app.args[i].b = va_arg(vl,bool);
     else if (rdef->args[i] == 'L') app.args[i].i64 = va_arg(vl,int64_t);
+    else if (rdef->args[i] == 'F') app.args[i].f = va_arg(vl,double);
+    else if (rdef->args[i] == 'D') app.args[i].lf = va_arg(vl,double);
     else assert(0 && "unknown arg type");
   }
 
   if (rdef->ret == 'S')
   {
     app.ret.s = va_arg(vl,char *);
-    app.ret_size = va_arg(vl,int);
+    str_len_ret = va_arg(vl,int *);
+    app.ret_size = str_len_ret ? *str_len_ret : 0;
   }
   else if (rdef->ret == 'W')
   {
     app.ret.ws = va_arg(vl,wchar_t *);
-    app.ret_size = va_arg(vl,int);
+    str_len_ret = va_arg(vl,int *);
+    app.ret_size = str_len_ret ? *str_len_ret : 0;
   }
   else if (rdef->ret != 0) 
   {
@@ -172,6 +183,10 @@ int basicipc_call(shmipc_client_t ipc, int reqid, ...)
     case 'L': *(int64_t*)ret = app.ret.i64; break;
     case 'P': *(void**)ret = app.ret.p; break;
     case 'B': *(bool*)ret = app.ret.b; break;
+    case 'F': *(double*)ret = app.ret.f; break;
+    case 'D': *(double*)ret = app.ret.lf; break;
+    case 'W':
+    case 'S': if (str_len_ret) *str_len_ret = app.ret_size; break;
   }
 
   return 0;
@@ -195,6 +210,8 @@ int basicipc_send_async(shmipc_client_t ipc, int reqid, ...)
     else if (rdef->args[i] == 'W') app.args[i].ws = va_arg(vl,wchar_t *);
     else if (rdef->args[i] == 'B') app.args[i].b = va_arg(vl,bool);
     else if (rdef->args[i] == 'L') app.args[i].i64 = va_arg(vl,int64_t);
+    else if (rdef->args[i] == 'F') app.args[i].f = va_arg(vl,double);
+    else if (rdef->args[i] == 'D') app.args[i].lf = va_arg(vl,double);
     else assert(0 && "unknown arg type");
   }
 
