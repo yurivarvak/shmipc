@@ -544,6 +544,7 @@ private:
         msg = channel->a_msgs + ch;
       else
         msg = channel->s_msgs + ch;
+	  s = IPCControl::NotUsed;
       if (msg->control.state.compare_exchange_strong(s, IPCControl::ClientSend))
         break;   // got comm channel
 
